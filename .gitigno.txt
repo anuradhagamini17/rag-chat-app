@@ -1,0 +1,9 @@
+venv/
+models/
+__pycache__/
+*.pyc
+*.pkl
+*.bin
+*.gguf
+chromadb/
+.streamlit/secrets.toml
