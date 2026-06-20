@@ -2,8 +2,10 @@ import streamlit as st
 from pypdf import PdfReader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from sentence_transformers import SentenceTransformer
+from groq import Groq
 import chromadb
-import google.generativeai as genai
+import os
+
 
 # ----------------------------
 # Page Config
@@ -16,186 +18,302 @@ st.set_page_config(
 
 st.title("📚 PDF RAG Chatbot")
 
-# ----------------------------
-# Gemini API Setup
-# ----------------------------
-genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 
 # ----------------------------
-# Chat History
+# Groq Setup
+# ----------------------------
+client = Groq(
+    api_key=st.secrets["GROQ_API_KEY"]
+)
+
+
+# ----------------------------
+# Chat Memory
 # ----------------------------
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
+
 # ----------------------------
-# Load Embedding Model
+# Embedding Model
 # ----------------------------
 @st.cache_resource
 def load_model():
-    return SentenceTransformer("all-MiniLM-L6-v2")
+
+    return SentenceTransformer(
+        "all-MiniLM-L6-v2"
+    )
+
 
 embedding_model = load_model()
+
+
 
 # ----------------------------
 # ChromaDB
 # ----------------------------
 @st.cache_resource
 def get_collection():
-    client = chromadb.PersistentClient(path="./chroma_db")
 
-    try:
-        client.delete_collection("pdf_collection")
-    except:
-        pass
+    os.makedirs(
+        "chroma_db",
+        exist_ok=True
+    )
 
-    return client.get_or_create_collection(
+    db = chromadb.PersistentClient(
+        path="chroma_db"
+    )
+
+    return db.get_or_create_collection(
         name="pdf_collection"
     )
 
+
 collection = get_collection()
+
+
 
 # ----------------------------
 # Upload PDF
 # ----------------------------
 uploaded_file = st.file_uploader(
-    "Upload a PDF",
+    "Upload your PDF",
     type=["pdf"]
 )
 
+
+
 if uploaded_file:
 
-    # Read PDF
-    pdf = PdfReader(uploaded_file)
+
+    reader = PdfReader(
+        uploaded_file
+    )
+
 
     text = ""
 
-    for page in pdf.pages:
-        page_text = page.extract_text()
 
-        if page_text:
-            text += page_text
+    for page in reader.pages:
 
-    # Empty PDF Check
+        content = page.extract_text()
+
+        if content:
+            text += content
+
+
+
     if not text.strip():
-        st.error("No text could be extracted from this PDF.")
+
+        st.error(
+            "No readable text found in PDF"
+        )
+
         st.stop()
 
-    # Split into chunks
+
+
     splitter = RecursiveCharacterTextSplitter(
         chunk_size=1000,
         chunk_overlap=200
     )
 
-    chunks = splitter.split_text(text)
 
-    # Create embeddings
-    embeddings = embedding_model.encode(chunks)
+    chunks = splitter.split_text(
+        text
+    )
 
-    # Clear previous collection
+
+
+    embeddings = embedding_model.encode(
+        chunks
+    )
+
+
+
+    # clear old data
     try:
-        collection.delete(
-            ids=[str(i) for i in range(100000)]
-        )
-    except:
+
+        old = collection.get()
+
+        if old["ids"]:
+
+            collection.delete(
+                ids=old["ids"]
+            )
+
+    except Exception:
         pass
 
-    ids = [str(i) for i in range(len(chunks))]
+
 
     collection.add(
-        ids=ids,
+
+        ids=[
+            str(i)
+            for i in range(len(chunks))
+        ],
+
         documents=chunks,
+
         embeddings=embeddings.tolist()
     )
 
-    st.success(f"Created {len(chunks)} chunks")
-    st.success(f"Created {len(embeddings)} embeddings")
-    st.success("Stored embeddings in ChromaDB")
 
-    # Preview chunks
-    with st.expander("View First 3 Chunks"):
-        for i, chunk in enumerate(chunks[:3]):
-            st.markdown(f"### Chunk {i+1}")
-            st.write(chunk)
 
-    # Display chat history
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
-
-    # User question
-    question = st.chat_input(
-        "Ask a question about the PDF..."
+    st.success(
+        f"Stored {len(chunks)} chunks"
     )
 
-    if question:
 
-        # Store user message
-        st.session_state.messages.append(
-            {
-                "role": "user",
-                "content": question
-            }
+
+# ----------------------------
+# Show Chat History
+# ----------------------------
+for message in st.session_state.messages:
+
+    with st.chat_message(
+        message["role"]
+    ):
+
+        st.markdown(
+            message["content"]
         )
 
-        with st.chat_message("user"):
-            st.markdown(question)
 
-        # Create query embedding
-        question_embedding = embedding_model.encode(
-            [question]
-        )
 
-        # Retrieve relevant chunks
-        results = collection.query(
-            query_embeddings=question_embedding.tolist(),
-            n_results=3
-        )
+# ----------------------------
+# Chat Input
+# ----------------------------
+question = st.chat_input(
+    "Ask something about your PDF..."
+)
 
-        retrieved_chunks = results["documents"][0]
 
-        context = "\n\n".join(retrieved_chunks)
 
-        prompt = f"""
-You are a helpful AI assistant.
+if question:
 
-Answer ONLY using the information provided in the context.
 
-If the answer is not available in the context, reply:
+    st.session_state.messages.append(
+        {
+            "role":"user",
+            "content":question
+        }
+    )
+
+
+    with st.chat_message("user"):
+
+        st.markdown(question)
+
+
+
+    query_embedding = embedding_model.encode(
+        [question]
+    )
+
+
+
+    results = collection.query(
+
+        query_embeddings=
+        query_embedding.tolist(),
+
+        n_results=3
+    )
+
+
+
+    context = "\n\n".join(
+        results["documents"][0]
+    )
+
+
+
+    prompt = f"""
+
+You are a PDF assistant.
+
+Answer only using the context.
+
+If the answer is not available say:
 
 "I could not find that information in the document."
 
 Context:
+
 {context}
 
+
 Question:
+
 {question}
+
 """
 
-        with st.spinner("Generating answer..."):
 
-            gemini_model = genai.GenerativeModel(
-                "gemini-1.5-flash"
+
+    with st.spinner(
+        "Thinking..."
+    ):
+
+
+        try:
+
+            response = client.chat.completions.create(
+
+                model="llama-3.3-70b-versatile",
+
+                messages=[
+                    {
+                        "role":"user",
+                        "content":prompt
+                    }
+                ]
+
             )
 
-            response = gemini_model.generate_content(
-                prompt
+
+            answer = response.choices[0].message.content
+
+
+
+        except Exception as e:
+
+            answer = (
+                "Groq API error. "
+                "Check your API key or quota."
             )
 
-            answer = response.text
 
-        # Store assistant message
-        st.session_state.messages.append(
-            {
-                "role": "assistant",
-                "content": answer
-            }
-        )
 
-        with st.chat_message("assistant"):
-            st.markdown(answer)
+    st.session_state.messages.append(
 
-        # Show sources
-        with st.expander("📄 Retrieved Source Chunks"):
-            for i, chunk in enumerate(retrieved_chunks):
-                st.markdown(f"### Source {i+1}")
-                st.write(chunk)
+        {
+            "role":"assistant",
+            "content":answer
+        }
+
+    )
+
+
+
+    with st.chat_message("assistant"):
+
+        st.markdown(answer)
+
+
+
+    with st.expander(
+        "📄 Sources"
+    ):
+
+        for i, doc in enumerate(
+            results["documents"][0]
+        ):
+
+            st.markdown(
+                f"### Source {i+1}"
+            )
+
+            st.write(doc)
